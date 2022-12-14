@@ -136,10 +136,10 @@ void DefaultCoordinator::updateReadingState(const InitialAllRangesAnnouncement &
     for (const auto & part: announcement.description)
     {
         auto covering_or_the_same_it = std::find_if(all_parts_to_read.begin(), all_parts_to_read.end(),
-            [&part] (const Part & other) { return other.description.info.contains(part.info) ||  part.info.contains(other.description.info); });
+            [&part] (const Part & other) { return !other.description.info.isDisjoint(part.info); });
 
         auto the_same_it = std::find_if(all_parts_to_read.begin(), all_parts_to_read.end(),
-            [&part] (const Part & other) { return other.description.info == part.info; });
+            [&part] (const Part & other) { return other.description.info.getPartName() == part.info.getPartName(); });
 
         /// We have the same part - add the info about presence on current replica to it
         if (the_same_it != all_parts_to_read.end())
