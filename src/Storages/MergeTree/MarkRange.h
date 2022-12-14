@@ -4,6 +4,9 @@
 #include <deque>
 #include <set>
 
+#include <fmt/core.h>
+#include <fmt/format.h>
+
 #include <IO/WriteBuffer.h>
 #include <IO/ReadBuffer.h>
 
@@ -46,3 +49,26 @@ size_t getLastMark(const MarkRanges & ranges);
 std::string toString(const MarkRanges & ranges);
 
 }
+
+
+template <>
+struct fmt::formatter<DB::MarkRange>
+{
+    constexpr static auto parse(format_parse_context & ctx)
+    {
+        const auto * it = ctx.begin();
+        const auto * end = ctx.end();
+
+        /// Only support {}.
+        if (it != end && *it != '}')
+            throw format_error("invalid format");
+
+        return it;
+    }
+
+    template <typename FormatContext>
+    auto format(const DB::MarkRange & range, FormatContext & ctx)
+    {
+        return format_to(ctx.out(), "{}", fmt::format("({}, {})", range.begin, range.end));
+    }
+};

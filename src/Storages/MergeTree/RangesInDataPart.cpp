@@ -17,16 +17,12 @@ void RangesInDataPartDescription::serialize(WriteBuffer & out) const
     ranges.serialize(out);
 }
 
-void RangesInDataPartDescription::describe(WriteBuffer & out) const
+String RangesInDataPartDescription::describe() const
 {
     String result;
-    result += "Reading from part: \n";
-    result += fmt::format("partition_id: {}, min_block: {}, max_block: {}, ", info.partition_id, info.min_block, info.max_block);
-    result += "Ranges: ";
-    for (const auto & range : ranges)
-        result += fmt::format("({}, {}), ", range.begin, range.end);
-    result += " $ ";
-    out.write(result.c_str(), result.size());
+    result += fmt::format("Part: {}, ", info.getPartName());
+    result += fmt::format("Ranges: [{}], ", fmt::join(ranges, ","));
+    return result;
 }
 
 void RangesInDataPartDescription::deserialize(ReadBuffer & in)
@@ -46,7 +42,8 @@ void RangesInDataPartsDescription::describe(WriteBuffer & out) const
 {
     String result;
     for (const auto & desc : *this)
-        desc.describe(out);
+        result += desc.describe();
+    out.write(result.c_str(), result.size());
 }
 
 void RangesInDataPartsDescription::deserialize(ReadBuffer & in)

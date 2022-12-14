@@ -22,7 +22,7 @@ struct RangesInDataPartDescription
     MarkRanges ranges;
 
     void serialize(WriteBuffer & out) const;
-    void describe(WriteBuffer & out) const;
+    String describe() const;
     void deserialize(ReadBuffer & in);
 };
 

@@ -17,6 +17,7 @@
 #include "Storages/MergeTree/RequestResponse.h"
 #include <Storages/MergeTree/MarkRange.h>
 #include <Storages/MergeTree/IntersectionsIndexes.h>
+#include <fmt/format.h>
 
 
 namespace DB
@@ -95,8 +96,6 @@ public:
     std::vector<InitialAllRangesAnnouncement> announcements;
 
     Parts all_parts_to_read;
-    /// Parts which intersects with the global state and we have to reject reading from them
-    Parts discarded_parts;
     /// Contains only parts which we haven't started to read from
     PartRefs delayed_parts;
     /// Per-replica preferred parts split by consistent hash
@@ -126,7 +125,7 @@ public:
 
 DefaultCoordinator::~DefaultCoordinator()
 {
-    LOG_TRACE(log, "Coordination done: {}", toString(stats));
+    LOG_INFO(log, "Coordination done: {}", toString(stats));
 }
 
 void DefaultCoordinator::updateReadingState(const InitialAllRangesAnnouncement & announcement)
@@ -151,10 +150,7 @@ void DefaultCoordinator::updateReadingState(const InitialAllRangesAnnouncement &
 
         /// It is covering part or we have covering - skip it
         if (covering_or_the_same_it != all_parts_to_read.end())
-        {
-            discarded_parts.insert({.description = part, /*Ignore this*/.replicas = {}});
             continue;
-        }
 
         auto new_part = Part{
             .description = part,
@@ -205,7 +201,14 @@ void DefaultCoordinator::finalizeReadingState()
         delayed_parts.pop_front();
     }
 
-    LOG_TRACE(log, "Reading state is fully initialized");
+    String description;
+    for (const auto & part : all_parts_to_read)
+    {
+        description += part.description.describe();
+        description += fmt::format("Replicas: ({}) --- ", fmt::join(part.replicas, ","));
+    }
+
+    LOG_INFO(log, "Reading state is fully initialized: {}", description);
 }
 
 
@@ -217,6 +220,7 @@ void DefaultCoordinator::handleInitialAllRangesAnnouncement(InitialAllRangesAnno
     stats[announcement.replica_num].number_of_requests +=1;
 
     ++sent_initial_requests;
+    LOG_INFO(log, "{} {}", sent_initial_requests, replicas_count);
     if (sent_initial_requests == replicas_count)
         finalizeReadingState();
 }
@@ -330,7 +334,7 @@ public:
     {}
     ~InOrderCoordinator() override
     {
-        LOG_TRACE(log, "Coordination done: {}", toString(stats));
+        LOG_INFO(log, "Coordination done: {}", toString(stats));
     }
 
     ParallelReadResponse handleRequest([[ maybe_unused ]]  ParallelReadRequest request) override;
