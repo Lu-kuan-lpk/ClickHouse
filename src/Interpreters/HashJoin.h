@@ -197,13 +197,16 @@ public:
 
     bool alwaysReturnsEmptySet() const final;
 
-    JoinKind getKind() const { return kind; }
+    JoinKind getKind() const override { return kind; }
     JoinStrictness getStrictness() const { return strictness; }
     const std::optional<TypeIndex> & getAsofType() const { return asof_type; }
     ASOFJoinInequality getAsofInequality() const { return asof_inequality; }
     bool anyTakeLastRow() const { return any_take_last_row; }
 
     const ColumnWithTypeAndName & rightAsofKeyColumn() const;
+
+
+    void announceEnd() override;
 
     /// Different types of keys for maps.
     #define APPLY_FOR_JOIN_VARIANTS(M) \
@@ -378,6 +381,7 @@ private:
     /// so we must guarantee constantness of hash table during HashJoin lifetime (using method setLock)
     mutable JoinStuff::JoinUsedFlags used_flags;
     RightTableDataPtr data;
+    std::vector<Block> left_data;
     std::vector<Sizes> key_sizes;
 
     /// Block with columns from the right-side table.

@@ -1,5 +1,7 @@
 #include <any>
+#include <cstddef>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -14,6 +16,7 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeLowCardinality.h>
 
+#include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/HashJoin.h>
 #include <Interpreters/JoinUtils.h>
 #include <Interpreters/TableJoin.h>
@@ -21,11 +24,17 @@
 #include <Interpreters/NullableUtils.h>
 
 #include <Storages/IStorage.h>
+#include <Processors/Sinks/SinkToStorage.h>
 
 #include <Core/ColumnNumbers.h>
 #include <Common/Exception.h>
 #include <Common/typeid_cast.h>
 #include <Common/assert_cast.h>
+#include "Columns/IColumn.h"
+#include "Core/ColumnWithTypeAndName.h"
+#include "Core/Field.h"
+#include "Interpreters/Context_fwd.h"
+#include "base/types.h"
 
 namespace DB
 {
@@ -779,6 +788,257 @@ bool HashJoin::addJoinedBlock(const Block & source_block, bool check_limits)
     return table_join->sizeLimits().check(total_rows, total_bytes, "JOIN", ErrorCodes::SET_SIZE_LIMIT_EXCEEDED);
 }
 
+void HashJoin::announceEnd()
+{
+    // do the logic of the cross
+    /**
+     * the first version ignore the **maxJoinBlockRow** arguement
+     */
+    // size_t num_left_col = block.columns();
+    // size_t num_right_col = sample_block_with_columns_to_add.columns();
+
+    // 0. construct the structured data
+
+    MutableColumns dst_columns;
+    ColumnRawPtrs src_left_columns;
+
+    std::string first_col_name = left_data[0].getByPosition(0).name;
+    LOG_DEBUG(log, "first col name is {}", first_col_name);
+    std::vector<std::string> types = {"conv", "max", "avg"};
+    int idx = -1;
+    for (int i = 0; i < 3; i++)
+    {
+        if (first_col_name.find(types[i]) == 0)
+        {
+            idx = i;
+            break;
+        }
+    }
+    // when the clickhouse-server start some hashjoin would be preform, we should incase they into the following logic
+    if (idx == -1)
+        return;
+
+    {
+        for (const auto & left_column : left_data[0])
+        {
+            src_left_columns.push_back(left_column.column.get());
+            dst_columns.emplace_back(src_left_columns.back()->cloneEmpty());
+        }
+    }
+
+
+    // 1. get the meta_data for output table
+    std::string table_name = types[idx] + "_result_table";
+
+    auto table = DatabaseCatalog::instance().getTable({"default", table_name}, nullptr);
+
+    auto meta_data = table->getInMemoryMetadataPtr();
+
+    std::cout << "joinBlockImplCross Log: " << meta_data->getColumns().size() << std::endl;
+
+    auto fetch_col_max = [&](std::vector<Block> src, size_t index) -> Int64
+    {
+        Int64 max = 0;
+        for (auto & i : src)
+        {
+            size_t num_row = i.rows();
+            src_left_columns.clear();
+            for (const ColumnWithTypeAndName & left_column : i)
+            {
+                src_left_columns.push_back(left_column.column.get());
+                // if(i==0) dst_columns.emplace_back(src_left_columns.back()->cloneEmpty());
+            }
+            const auto * col = src_left_columns[index];
+            for (size_t j = 0; j < num_row; j++)
+            {
+                Field tmpf;
+                col->get(j, tmpf);
+                max = max > tmpf.get<Int64>() ? max : tmpf.get<Int64>();
+            }
+        }
+        // the index start from the 0--max, so the max index should be max+1
+        return max + 1;
+    };
+
+    auto fetch_val_int = [](const IColumn * col, size_t index) -> auto
+    {
+        Field tmpf;
+        col->get(index, tmpf);
+        return tmpf.get<Int64>();
+    };
+
+    auto fetch_val_double = [](const IColumn * col, size_t index) -> auto
+    {
+        Field tmpf;
+        col->get(index, tmpf);
+        return tmpf.get<double>();
+    };
+
+    // auto construct_array = [&](std::vector<Block> src)->auto{
+
+    //     return feature_map;
+    // };
+
+    Int64 nmax = fetch_col_max(left_data, 0);
+    Int64 chmax = fetch_col_max(left_data, 1);
+    Int64 rmax = fetch_col_max(left_data, 2);
+    Int64 comax = fetch_col_max(left_data, 3);
+
+    LOG_DEBUG(log, "fmap generate {},{},{},{}", nmax, chmax, rmax, comax);
+
+    double feature_map[nmax][chmax][rmax][comax];
+
+    for (auto & b : left_data)
+    {
+        src_left_columns.clear();
+        for (const ColumnWithTypeAndName & left_column : b)
+        {
+            src_left_columns.push_back(left_column.column.get());
+            // if(i==0) dst_columns.emplace_back(src_left_columns.back()->cloneEmpty());
+        }
+        size_t num_left_row = b.rows();
+        for (size_t i = 0; i < num_left_row; i++)
+        {
+            feature_map[fetch_val_int(src_left_columns[0], i)][fetch_val_int(src_left_columns[1], i)][fetch_val_int(src_left_columns[2], i)]
+                       [fetch_val_int(src_left_columns[3], i)]
+                = fetch_val_double(src_left_columns[4], i);
+        }
+    }
+
+
+    // 2. do the curve multiple
+    Int64 knmax = 0, kchmax = 0, krmax = 0, kcomax = 0;
+    Int64 on = 0, och = 0, orr = 0, oco = 0;
+    std::vector<Block> right_data;
+    for (const Block & block_right : data->blocks)
+    {
+        right_data.push_back(block_right);
+    }
+    if (idx == 0)
+    {
+        knmax = fetch_col_max(right_data, 0);
+        kchmax = fetch_col_max(right_data, 1);
+        krmax = fetch_col_max(right_data, 2);
+        kcomax = fetch_col_max(right_data, 3);
+
+        LOG_DEBUG(log, "kmap generate {},{},{},{}", knmax, kchmax, krmax, kcomax);
+    }
+    else if (idx == 1 || idx == 2)
+    {
+        Field tmpf;
+        right_data[0].getColumns()[0]->get(0, tmpf);
+        krmax = tmpf.get<Int64>();
+        right_data[0].getColumns()[1]->get(0, tmpf);
+        kcomax = tmpf.get<Int64>();
+
+        on = nmax;
+        och = chmax;
+        orr = (rmax - krmax + 1);
+        oco = (comax - kcomax + 1);
+    }
+
+    double kernel_map[knmax][kchmax][krmax][kcomax];
+
+    if (idx == 0)
+    {
+        for (auto & b : right_data)
+        {
+            src_left_columns.clear();
+            for (const ColumnWithTypeAndName & left_column : b)
+            {
+                src_left_columns.push_back(left_column.column.get());
+                // if(i==0) dst_columns.emplace_back(src_left_columns.back()->cloneEmpty());
+            }
+            size_t num_right_row = b.rows();
+            for (size_t i = 0; i < num_right_row; i++)
+            {
+                kernel_map[fetch_val_int(src_left_columns[0], i)][fetch_val_int(src_left_columns[1], i)]
+                          [fetch_val_int(src_left_columns[2], i)][fetch_val_int(src_left_columns[3], i)]
+                    = fetch_val_double(src_left_columns[4], i);
+            }
+        }
+
+        on = nmax;
+        och = knmax;
+        orr = rmax - krmax + 1;
+        oco = comax - kcomax + 1;
+    }
+
+
+    LOG_DEBUG(log, "omap generate {},{},{},{}", on, och, orr, oco);
+    for (Int64 n = 0; n < on; n++)
+    {
+        for (Int64 ch = 0; ch < och; ch++)
+        {
+            for (Int64 rr = 0; rr < orr; rr++)
+            {
+                for (Int64 co = 0; co < oco; co++)
+                {
+                    double val = 0;
+                    if (idx == 0)
+                    {
+                        for (int chidx = 0; chidx < kchmax; chidx++)
+                        {
+                            for (int ridx = 0; ridx < krmax; ridx++)
+                            {
+                                for (int cidx = 0; cidx < kcomax; cidx++)
+                                {
+                                    val += (feature_map[n][chidx][ridx + rr][cidx + co] * kernel_map[ch][chidx][ridx][cidx]);
+                                }
+                            }
+                        }
+                    }
+                    else if (idx == 1 || idx == 2)
+                    {
+                        for (int ridx = 0; ridx < krmax; ridx++)
+                        {
+                            for (int cidx = 0; cidx < kcomax; cidx++)
+                            {
+                                if (idx == 1)
+                                {
+                                    val = fmax(val, feature_map[n][ch][rr + ridx][co + cidx]);
+                                }
+                                else
+                                {
+                                    val += feature_map[n][ch][rr + ridx][co + cidx];
+                                }
+                            }
+                        }
+                        if (idx == 2)
+                        {
+                            val = val / (kcomax * krmax);
+                        }
+                    }
+
+                    dst_columns[0]->insert(Field(n));
+                    dst_columns[1]->insert(Field(ch));
+                    dst_columns[2]->insert(Field(rr));
+                    dst_columns[3]->insert(Field(co));
+                    dst_columns[4]->insert(Field(val));
+                    // std::cout<<"joinBlockImplCross Log: "<<n<<" "<<ch<<" "<<rr<<" "<<co<<" "<<val<<std::endl;
+                }
+            }
+        }
+    }
+    // Block block(left_data[0].getColumnsWithTypeAndName());
+
+    // block = block.cloneWithColumns(std::move(dst_columns));
+
+
+    // 3. insert the date to the StorageMemory
+
+    SinkToStoragePtr sink = table->write(nullptr, meta_data, nullptr);
+
+    // convert block to chunk
+
+    // the following would fail if the dstcol donot contains any data
+    int rows = dst_columns[0]->size();
+    auto chunk = Chunk(std::move(dst_columns), rows);
+
+    sink->consume(std::move(chunk));
+
+    sink->onFinish();
+}
 
 namespace
 {
@@ -1688,7 +1948,49 @@ void HashJoin::joinBlock(Block & block, ExtraBlockPtr & not_processed)
 
     if (kind == JoinKind::Cross)
     {
-        joinBlockImplCross(block, not_processed);
+        auto mblock = materializeBlock(block);
+        left_data.push_back(mblock);
+
+        Int64 totalb = 0;
+        for(const auto &b: left_data) totalb += static_cast<Int64>(b.bytes());
+
+        LOG_DEBUG(log, "current left_data size {}, total byte {}", left_data.size(), totalb);
+
+        // find the type of cross join
+        std::string first_col_name = left_data[0].getByPosition(0).name;
+        std::vector<std::string> types = {"conv", "max", "avg" };
+        int idx = -1;
+        for(int i=0;i<3;i++){
+            if(first_col_name.find(types[i])==0){
+                idx = i;
+                break;
+            }
+        }
+
+        if(idx==-1){
+            joinBlockImplCross(block,not_processed);
+        } else {
+            // let the output block satisfy the check of the format
+            // 1. rows should be equal to all of the column
+            // 2. cols should be equal to the result of the select [will be checked outside]
+        
+            MutableColumns dst_columns;
+
+            for (const ColumnWithTypeAndName & left_column : block)
+                dst_columns.emplace_back(left_column.column->cloneEmpty());
+
+            for (const ColumnWithTypeAndName & right_column : sample_block_with_columns_to_add)
+                dst_columns.emplace_back(right_column.column->cloneEmpty());
+
+            for (const ColumnWithTypeAndName & src_column : sample_block_with_columns_to_add)
+                block.insert(src_column);
+
+            block = block.cloneWithColumns(std::move(dst_columns));
+        }
+
+        // set the result to none
+        not_processed = nullptr;
+
         return;
     }
 

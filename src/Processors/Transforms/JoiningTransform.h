@@ -64,6 +64,7 @@ private:
     bool has_output = false;
     bool stop_reading = false;
     bool process_non_joined = true;
+    bool do_announce = false;
 
     JoinPtr join;
     bool on_totals;

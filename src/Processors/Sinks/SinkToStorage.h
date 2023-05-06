@@ -16,9 +16,9 @@ public:
 
     const Block & getHeader() const { return inputs.front().getHeader(); }
     void addTableLock(const TableLockHolder & lock) { table_locks.push_back(lock); }
+    virtual void consume(Chunk chunk) = 0;
 
 protected:
-    virtual void consume(Chunk chunk) = 0;
     virtual bool lastBlockIsDuplicate() const { return false; }
 
 private:

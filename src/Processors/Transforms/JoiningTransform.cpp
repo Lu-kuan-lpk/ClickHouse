@@ -3,6 +3,7 @@
 #include <Interpreters/JoinUtils.h>
 
 #include <Common/logger_useful.h>
+#include "Core/Joins.h"
 
 namespace DB
 {
@@ -43,6 +44,10 @@ JoiningTransform::JoiningTransform(
 
 IProcessor::Status JoiningTransform::prepare()
 {
+    // when its the cross join
+    // when the input finish, we should announce to the end that should do the curvemul
+
+
     auto & output = outputs.front();
 
     /// Check can output.
@@ -89,6 +94,10 @@ IProcessor::Status JoiningTransform::prepare()
     auto & input = inputs.front();
     if (input.isFinished())
     {
+        if(join->getKind()==JoinKind::Cross && !do_announce){
+            do_announce = true;
+            join->announceEnd();
+        }
         if (process_non_joined)
             return Status::Ready;
 
@@ -107,43 +116,46 @@ IProcessor::Status JoiningTransform::prepare()
 }
 
 void JoiningTransform::work()
-{
-    if (has_input)
-    {
-        transform(input_chunk);
-        output_chunk.swap(input_chunk);
-        has_input = not_processed != nullptr;
-        has_output = !output_chunk.empty();
-    }
-    else
-    {
-        if (!non_joined_blocks)
+{   
+        if (has_input)
         {
-            if (!finish_counter || !finish_counter->isLast())
-            {
-                process_non_joined = false;
-                return;
-            }
-
-            non_joined_blocks = join->getNonJoinedBlocks(
-                inputs.front().getHeader(), outputs.front().getHeader(), max_block_size);
+            transform(input_chunk);
+            output_chunk.swap(input_chunk);
+            has_input = not_processed != nullptr;
+            has_output = !output_chunk.empty();
+        }
+        else
+        {
             if (!non_joined_blocks)
             {
+                if (!finish_counter || !finish_counter->isLast())
+                { 
+                    process_non_joined = false;
+                    return;
+                }
+
+                non_joined_blocks = join->getNonJoinedBlocks(
+                    inputs.front().getHeader(), outputs.front().getHeader(), max_block_size);
+                if (!non_joined_blocks)
+                {
+                    process_non_joined = false;
+                    return;
+                }
+            }
+
+            Block block = non_joined_blocks->read();
+            if (!block)
+            {
                 process_non_joined = false;
                 return;
             }
-        }
 
-        Block block = non_joined_blocks->read();
-        if (!block)
-        {
-            process_non_joined = false;
-            return;
-        }
-
-        auto rows = block.rows();
-        output_chunk.setColumns(block.getColumns(), rows);
-        has_output = true;
+            auto rows = block.rows();
+            output_chunk.setColumns(block.getColumns(), rows);
+            //accelerate the process by preventing the output of cross join
+            if(join->getKind()!=JoinKind::Cross){
+                has_output = true;
+            } 
     }
 }
 
